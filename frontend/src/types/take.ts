@@ -16,6 +16,8 @@ export interface Take {
   endTc: string;
   /** 评级 */
   grade: TakeGrade;
+  /** 最近一次评级修改的时间戳；缺省表示评级自历史数据继承、从未被改过 */
+  gradeChangedAt?: number;
   /** 问题标签 */
   issues: TakeIssue[];
 }

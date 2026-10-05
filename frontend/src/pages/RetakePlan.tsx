@@ -36,6 +36,7 @@ import {
   removeRetake,
   DB_NAME,
   DB_SCHEMA_VERSION,
+  type EditListVersionRow,
   type ProjectRow,
   type RetakeRow,
   type SessionRow,
@@ -45,6 +46,7 @@ import {
 import { RETAKE_STATES, createEmptyRetake, type Retake } from '@/types/retake';
 import { buildRow } from '@/hooks/useIdbTable';
 import { buildSessionSheet, downloadJson, parseSheet, serializeSheet, type SessionSheet } from '@/utils/export';
+import { deriveEditListStatus, formatConfirmedAt } from '@/utils/editList';
 import { formatDuration, totalDuration } from '@/utils/timecode';
 
 export default function RetakePlan() {
@@ -53,7 +55,15 @@ export default function RetakePlan() {
   const projects = useIdbTable<ProjectRow>(db.projects);
   const sessions = useIdbTable<SessionRow>(db.sessions);
   const takes = useIdbTable<TakeRow>(db.takes);
+  const picks = useIdbTable(db.picks);
+  const editListVersions = useIdbTable<EditListVersionRow>(db.editListVersions);
   const currentProjectId = useProjectStore((state) => state.currentProjectId);
+
+  /** 剪接清单对账：未确认 / 已失效时导出按钮拦截 */
+  const editListStatus = useMemo(
+    () => deriveEditListStatus({ picks, takes, versions: editListVersions }),
+    [picks, takes, editListVersions]
+  );
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<RetakeRow | null>(null);
@@ -143,10 +153,16 @@ export default function RetakePlan() {
   }
 
   async function exportSheet(): Promise<void> {
-    const current = await buildSessionSheet();
-    setSheet(current);
-    downloadJson(`场次记录表-${current.exportedAt.slice(0, 10)}.json`, serializeSheet(current));
-    message.success('场次记录表已下载');
+    try {
+      const current = await buildSessionSheet();
+      setSheet(current);
+      downloadJson(`场次记录表-${current.exportedAt.slice(0, 10)}.json`, serializeSheet(current));
+      message.success(`场次记录表（确认版 v${current.confirmedEditList?.version ?? '—'}）已下载`);
+    } catch (exportError) {
+      const text = exportError instanceof Error ? exportError.message : '导出失败';
+      setError(text);
+      message.error(text);
+    }
   }
 
   async function exportLibrary(): Promise<void> {
@@ -186,11 +202,26 @@ export default function RetakePlan() {
             本地库 {DB_NAME}（结构版本 v{DB_SCHEMA_VERSION}）· 补录完成后自动联动曲目录制状态。
           </p>
         </div>
-        <Space>
+        <Space wrap>
+          <Tag
+            color={editListStatus.state === 'confirmed' ? 'success' : editListStatus.state === 'stale' ? 'error' : 'warning'}
+          >
+            剪接清单：
+            {editListStatus.state === 'confirmed'
+              ? `确认版 v${editListStatus.latest?.version} 有效`
+              : editListStatus.state === 'stale'
+                ? `已失效（v${editListStatus.latest?.version} 可查），导出停住`
+                : '未确认，导出停住'}
+          </Tag>
           <Button icon={<DownloadOutlined />} onClick={exportLibrary}>
             导出整库备份
           </Button>
-          <Button type="primary" icon={<DownloadOutlined />} onClick={exportSheet}>
+          <Button
+            type="primary"
+            danger={editListStatus.state !== 'confirmed'}
+            icon={<DownloadOutlined />}
+            onClick={exportSheet}
+          >
             导出场次记录表
           </Button>
           <Button
@@ -359,6 +390,13 @@ export default function RetakePlan() {
                 </Descriptions.Item>
                 <Descriptions.Item label="优选 / 补录">
                   {counts.picks ?? 0} / {counts.retakes ?? 0}
+                </Descriptions.Item>
+                <Descriptions.Item label="剪接清单确认版">
+                  {editListStatus.latest
+                    ? `v${editListStatus.latest.version} · ${formatConfirmedAt(editListStatus.latest.confirmedAt)}${
+                        editListStatus.state === 'confirmed' ? '（有效）' : '（已失效，重新确认前导出停住）'
+                      }`
+                    : '未确认'}
                 </Descriptions.Item>
                 <Descriptions.Item label="记录表生成时间">
                   {sheet ? sheet.exportedAt.slice(0, 19).replace('T', ' ') : '—'}

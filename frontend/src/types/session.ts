@@ -12,6 +12,8 @@ export interface Session {
   date: string;
   /** 时段 */
   period: SessionPeriod;
+  /** 场次时长（分钟）；历史数据缺省时按时段回填，见 PERIOD_DEFAULT_MINUTES */
+  durationMin: number;
   /** 录音师 */
   engineer: string;
   /** 棚号 */
@@ -30,6 +32,7 @@ export function createEmptySession(): Omit<Session, 'id'> {
     songId: '',
     date: new Date().toISOString().slice(0, 10),
     period: '上午',
+    durationMin: 240,
     engineer: '',
     roomNo: 'A 棚',
     musicians: '',

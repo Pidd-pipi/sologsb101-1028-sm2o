@@ -162,6 +162,15 @@ body {
   border-top: 2px dashed var(--studio-primary);
 }
 
+.pick-card-invalid {
+  border-color: #ffa39e;
+  background: #fff2f0;
+}
+
+.pick-card-invalid .ant-card-head {
+  background: #fff1f0;
+}
+
 .take-row-selected {
   background: #eef6fb;
 }

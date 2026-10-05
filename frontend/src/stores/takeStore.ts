@@ -19,7 +19,7 @@ interface TakeState {
   createTake: (payload: Omit<Take, 'id'>) => Promise<string>;
   editTake: (id: string, patch: Partial<Take>) => Promise<void>;
   deleteTake: (id: string) => Promise<void>;
-  batchGrade: (ids: string[], grade: Take['grade']) => Promise<void>;
+  batchGrade: (ids: string[], grade: Take['grade']) => Promise<number>;
 }
 
 export const useTakeStore = create<TakeState>()((set, get) => ({
@@ -48,8 +48,9 @@ export const useTakeStore = create<TakeState>()((set, get) => ({
     set((state) => ({ selectedIds: state.selectedIds.filter((item) => item !== id) }));
   },
   batchGrade: async (ids, grade) => {
-    await bulkUpdateGrade(ids, grade);
+    const changed = await bulkUpdateGrade(ids, grade);
     set({ selectedIds: [] });
     void get();
+    return changed;
   }
 }));

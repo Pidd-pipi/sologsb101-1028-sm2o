@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
+  Alert,
   Button,
   Card,
   Col,
@@ -16,20 +17,31 @@ import {
   Space,
   Table,
   Tag,
+  Timeline,
   Typography,
   message
 } from 'antd';
-import { HolderOutlined, PlusOutlined } from '@ant-design/icons';
+import { HolderOutlined, PlusOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
 import FilterBar from '@/components/common/FilterBar';
 import StatBadge from '@/components/common/StatBadge';
 import TakeBadge from '@/components/common/TakeBadge';
 import EmptyPanel from '@/components/common/EmptyPanel';
 import { useIdbTable } from '@/hooks/useIdbTable';
 import { usePickStore } from '@/stores/pickStore';
-import { db, type PickRow, type ProjectRow, type SessionRow, type SongRow, type TakeRow } from '@/utils/db';
+import {
+  db,
+  type EditListVersionRow,
+  type PickRow,
+  type ProjectRow,
+  type SessionRow,
+  type SongRow,
+  type TakeRow
+} from '@/utils/db';
 import { PICK_USAGES, createEmptyPick, type Pick } from '@/types/pick';
 import type { FilterModel, FilterSelectConfig } from '@/types/filter';
 import { buildEditList, formatDuration, takeDuration, totalDuration } from '@/utils/timecode';
+import { deriveEditListStatus, formatConfirmedAt } from '@/utils/editList';
+import type { EditListInvalidRef } from '@/types/editList';
 
 const asArray = (value: string | string[] | boolean | undefined): string[] => (Array.isArray(value) ? value : []);
 
@@ -40,6 +52,7 @@ export default function PickSummary() {
   const sessions = useIdbTable<SessionRow>(db.sessions);
   const songs = useIdbTable<SongRow>(db.songs);
   const projects = useIdbTable<ProjectRow>(db.projects);
+  const editListVersions = useIdbTable<EditListVersionRow>(db.editListVersions);
 
   const filters = usePickStore((state) => state.filters);
   const setFilters = usePickStore((state) => state.setFilters);
@@ -48,6 +61,7 @@ export default function PickSummary() {
   const editPick = usePickStore((state) => state.editPick);
   const deletePick = usePickStore((state) => state.deletePick);
   const move = usePickStore((state) => state.move);
+  const confirmEditList = usePickStore((state) => state.confirmEditList);
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<PickRow | null>(null);
@@ -124,6 +138,29 @@ export default function PickSummary() {
     [takes, picks]
   );
 
+  /** 剪接清单对账：评级一改即失效，旧确认版仍可查，重新确认前导出停住 */
+  const editListStatus = useMemo(
+    () => deriveEditListStatus({ picks, takes, versions: editListVersions }),
+    [picks, takes, editListVersions]
+  );
+
+  /** 失效引用按 pickId 索引，卡片上点名标红 */
+  const invalidRefMap = useMemo(() => {
+    const map = new Map<string, EditListInvalidRef>();
+    editListStatus.invalidRefs.forEach((ref) => map.set(ref.pickId, ref));
+    return map;
+  }, [editListStatus]);
+
+  async function handleConfirmEditList(): Promise<void> {
+    try {
+      const version = await confirmEditList();
+      message.success(`剪接清单 v${version.version} 已确认，可以导出场次记录表`);
+    } catch (confirmError) {
+      const text = confirmError instanceof Error ? confirmError.message : '确认失败';
+      message.error(text);
+    }
+  }
+
   async function submit(): Promise<void> {
     const values = await form.validateFields();
     if (editing) {
@@ -180,6 +217,45 @@ export default function PickSummary() {
         <StatBadge label="用途种类" value={totals.usageCount} suffix="类" tone="danger" icon="trend" />
       </div>
 
+      {picks.length > 0 ? (
+        <Alert
+          type={editListStatus.state === 'confirmed' ? 'success' : editListStatus.state === 'stale' ? 'error' : 'warning'}
+          showIcon
+          style={{ marginBottom: 12 }}
+          message={
+            <Space wrap>
+              <SafetyCertificateOutlined />
+              <span>
+                {editListStatus.state === 'confirmed'
+                  ? `剪接清单确认版 v${editListStatus.latest?.version}（${formatConfirmedAt(
+                      editListStatus.latest?.confirmedAt ?? 0
+                    )} 确认）有效`
+                  : editListStatus.state === 'stale'
+                    ? `剪接清单已失效，最新确认版 v${editListStatus.latest?.version} 仍可查，重新确认前导出停住`
+                    : '剪接清单尚未确认'}
+              </span>
+              <Button
+                size="small"
+                type={editListStatus.state === 'confirmed' ? 'default' : 'primary'}
+                onClick={() => void handleConfirmEditList()}
+              >
+                {editListStatus.latest ? '重新确认当前清单' : '确认当前清单'}
+              </Button>
+            </Space>
+          }
+          description={
+            <Space direction="vertical" size={2}>
+              <span>{editListStatus.message}</span>
+              {editListStatus.invalidRefs.map((ref) => (
+                <span key={ref.pickId} style={{ color: '#cf1322' }}>
+                  · {ref.reasonText}
+                </span>
+              ))}
+            </Space>
+          }
+        />
+      ) : null}
+
       <FilterBar
         modelValue={filters}
         selects={selects}
@@ -210,12 +286,19 @@ export default function PickSummary() {
             <Space direction="vertical" size={10} style={{ width: '100%' }}>
               {filtered.map((pick, index) => {
                 const take = takeOf(pick.takeId);
+                const invalidRef = invalidRefMap.get(pick.id);
                 return (
                   <Card
                     key={pick.id}
                     size="small"
                     draggable
-                    className={dragIndex === index ? 'is-dragging' : overIndex === index ? 'is-over' : ''}
+                    className={[
+                      dragIndex === index ? 'is-dragging' : '',
+                      overIndex === index ? 'is-over' : '',
+                      invalidRef ? 'pick-card-invalid' : ''
+                    ]
+                      .filter(Boolean)
+                      .join(' ')}
                     onDragStart={() => setDragIndex(index)}
                     onDragOver={(event) => {
                       event.preventDefault();
@@ -229,6 +312,7 @@ export default function PickSummary() {
                         <span>#{index + 1}</span>
                         <Tag color="blue">{pick.usage}</Tag>
                         {take ? <TakeBadge grade={take.grade} issues={take.issues} showIssues={false} /> : null}
+                        {invalidRef ? <Tag color="error">已失效</Tag> : null}
                       </Space>
                     }
                     extra={
@@ -280,6 +364,9 @@ export default function PickSummary() {
                         {take ? `${sessionLabel(take.sessionId)} · 时长 ${formatDuration(takeDuration(take.startTc, take.endTc))}` : '—'}
                       </Typography.Text>
                       <Typography.Text type="secondary">备注：{pick.note || '—'}</Typography.Text>
+                      {invalidRef ? (
+                        <Typography.Text type="danger">失效原因：{invalidRef.reasonText}（重新确认前不能导出）</Typography.Text>
+                      ) : null}
                     </Space>
                   </Card>
                 );
@@ -287,35 +374,75 @@ export default function PickSummary() {
             </Space>
           </Col>
           <Col xs={24} xl={9}>
-            <Card title="剪接清单（自动生成）">
-              {editList.length === 0 ? (
-                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无可拼接的片段" />
-              ) : (
-                <List
-                  size="small"
-                  dataSource={editList}
-                  footer={
-                    <Typography.Text strong>
-                      合计时长 {formatDuration(totalDuration(editList))} · 共 {editList.length} 段
-                    </Typography.Text>
-                  }
-                  renderItem={(item, index) => (
-                    <List.Item>
-                      <Space>
-                        <Tag>{index + 1}</Tag>
-                        <span>{item.takeNo}</span>
-                        <Typography.Text type="secondary">
-                          {item.startTc} → {item.endTc}
-                        </Typography.Text>
-                      </Space>
-                    </List.Item>
-                  )}
-                />
-              )}
-              <Typography.Paragraph copyable={{ text: buildEditList(editList) }} style={{ marginTop: 12 }}>
-                <pre style={{ margin: 0, fontSize: 12, whiteSpace: 'pre-wrap' }}>{buildEditList(editList) || '（空）'}</pre>
-              </Typography.Paragraph>
-            </Card>
+            <Space direction="vertical" size={12} style={{ width: '100%' }}>
+              <Card
+                title="剪接清单（自动生成）"
+                extra={
+                  <Tag color={editListStatus.state === 'confirmed' ? 'success' : editListStatus.state === 'stale' ? 'error' : 'warning'}>
+                    {editListStatus.state === 'confirmed'
+                      ? `已确认 v${editListStatus.latest?.version}`
+                      : editListStatus.state === 'stale'
+                        ? '已失效 · 导出停住'
+                        : '未确认 · 导出停住'}
+                  </Tag>
+                }
+              >
+                {editList.length === 0 ? (
+                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无可拼接的片段" />
+                ) : (
+                  <List
+                    size="small"
+                    dataSource={editList}
+                    footer={
+                      <Typography.Text strong>
+                        合计时长 {formatDuration(totalDuration(editList))} · 共 {editList.length} 段
+                      </Typography.Text>
+                    }
+                    renderItem={(item, index) => (
+                      <List.Item>
+                        <Space>
+                          <Tag>{index + 1}</Tag>
+                          <span>{item.takeNo}</span>
+                          <Typography.Text type="secondary">
+                            {item.startTc} → {item.endTc}
+                          </Typography.Text>
+                        </Space>
+                      </List.Item>
+                    )}
+                  />
+                )}
+                <Typography.Paragraph copyable={{ text: buildEditList(editList) }} style={{ marginTop: 12 }}>
+                  <pre style={{ margin: 0, fontSize: 12, whiteSpace: 'pre-wrap' }}>{buildEditList(editList) || '（空）'}</pre>
+                </Typography.Paragraph>
+              </Card>
+
+              <Card title={`剪接清单确认版历史（${editListVersions.length}）`}>
+                {editListVersions.length === 0 ? (
+                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有确认版，确认当前清单后才能导出" />
+                ) : (
+                  <Timeline
+                    items={editListVersions.map((version) => ({
+                      color: editListStatus.latest?.id === version.id && editListStatus.state === 'confirmed' ? 'green' : 'gray',
+                      children: (
+                        <Space direction="vertical" size={2}>
+                          <Space>
+                            <Typography.Text strong>v{version.version}</Typography.Text>
+                            <Tag>{version.entries.length} 段</Tag>
+                            <Typography.Text type="secondary">{formatConfirmedAt(version.confirmedAt)}</Typography.Text>
+                            {editListStatus.latest?.id === version.id ? <Tag color="blue">最新确认版</Tag> : null}
+                          </Space>
+                          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                            {version.entries
+                              .map((entry) => `${entry.order}. ${entry.takeNo}（${entry.grade}）`)
+                              .join('　')}
+                          </Typography.Text>
+                        </Space>
+                      )
+                    }))}
+                  />
+                )}
+              </Card>
+            </Space>
           </Col>
         </Row>
       )}

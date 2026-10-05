@@ -301,8 +301,10 @@ export default function TakeBoard() {
               disabled={selectedIds.length === 0}
               onChange={(value) => {
                 void (async () => {
-                  await batchGrade(selectedIds, value as TakeGrade);
-                  message.success(`已将 ${selectedIds.length} 条改为「${value}」`);
+                  const changed = await batchGrade(selectedIds, value as TakeGrade);
+                  if (changed > 0) {
+                    message.success(`已将 ${changed} 条改为「${value}」，引用这些 Take 的剪接清单已立即失效`);
+                  }
                 })();
               }}
             />

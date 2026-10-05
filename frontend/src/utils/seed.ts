@@ -14,13 +14,18 @@ import type {
   SessionRow,
   TakeRow,
   PickRow,
-  RetakeRow
+  RetakeRow,
+  EditListVersionRow
 } from './db';
 import { ROW_REVISION } from './revision';
 
 function rev<T>(row: T): T & { revision: number; createdAt: number; updatedAt: number } {
   const now = Date.now();
   return { ...row, revision: ROW_REVISION, createdAt: now, updatedAt: now };
+}
+
+function revAt<T>(row: T, at: number): T & { revision: number; createdAt: number; updatedAt: number } {
+  return { ...row, revision: ROW_REVISION, createdAt: at, updatedAt: at };
 }
 
 const PROJECTS: Array<Omit<ProjectRow, 'revision' | 'createdAt' | 'updatedAt'>> = [
@@ -37,10 +42,10 @@ const SONGS: Array<Omit<SongRow, 'revision' | 'createdAt' | 'updatedAt'>> = [
 ];
 
 const SESSIONS: Array<Omit<SessionRow, 'revision' | 'createdAt' | 'updatedAt'>> = [
-  { id: 'ss-001', songId: 'sg-001', date: '2024-03-12', period: '上午', engineer: '赵鸣', roomNo: 'A 棚', musicians: '鼓：许峰、贝斯：黎川、吉他：程野', state: '已完成' },
-  { id: 'ss-002', songId: 'sg-001', date: '2024-03-13', period: '下午', engineer: '赵鸣', roomNo: 'A 棚', musicians: '弦乐四重奏', state: '已完成' },
-  { id: 'ss-003', songId: 'sg-002', date: '2024-03-20', period: '晚上', engineer: '何笙', roomNo: 'B 棚', musicians: '大提琴：闻州', state: '已排期' },
-  { id: 'ss-004', songId: 'sg-003', date: '2024-03-18', period: '上午', engineer: '赵鸣', roomNo: 'C 棚', musicians: '钢琴：苏禾', state: '已完成' }
+  { id: 'ss-001', songId: 'sg-001', date: '2024-03-12', period: '上午', durationMin: 240, engineer: '赵鸣', roomNo: 'A 棚', musicians: '鼓：许峰、贝斯：黎川、吉他：程野', state: '已完成' },
+  { id: 'ss-002', songId: 'sg-001', date: '2024-03-13', period: '下午', durationMin: 240, engineer: '赵鸣', roomNo: 'A 棚', musicians: '弦乐四重奏', state: '已完成' },
+  { id: 'ss-003', songId: 'sg-002', date: '2024-03-20', period: '晚上', durationMin: 180, engineer: '何笙', roomNo: 'B 棚', musicians: '大提琴：闻州', state: '已排期' },
+  { id: 'ss-004', songId: 'sg-003', date: '2024-03-18', period: '上午', durationMin: 240, engineer: '赵鸣', roomNo: 'C 棚', musicians: '钢琴：苏禾', state: '已完成' }
 ];
 
 const TAKES: Array<Omit<TakeRow, 'revision' | 'createdAt' | 'updatedAt'>> = [
@@ -63,11 +68,42 @@ const RETAKES: Array<Omit<RetakeRow, 'revision' | 'createdAt' | 'updatedAt'>> = 
   { id: 'rt-002', songId: 'sg-003', reason: '踏板噪声偏大，需重录第二段', planDate: '2024-03-27', state: '待安排' }
 ];
 
-/** 灌入演示数据（项目 → 曲目 → 场次 → Take → 优选 / 补录）；目标库由调用方传入，避免反向 import */
+// 首次播种即给出一版已确认剪接清单（v1）。页面上一旦修改这些 Take 的评级，
+// 因评级时间戳晚于确认时间，清单立即失效、导出停住，旧确认版仍可在历史中查看。
+const EDIT_LIST_SEED_TIME = Date.parse('2024-03-19T02:00:00.000Z');
+
+const EDIT_LIST_VERSIONS: Array<Omit<EditListVersionRow, 'revision' | 'createdAt' | 'updatedAt'>> = [
+  {
+    id: 'el-1',
+    version: 1,
+    confirmedAt: EDIT_LIST_SEED_TIME,
+    signature:
+      PICKS.map((pick) => {
+        const take = TAKES.find((item) => item.id === pick.takeId);
+        return [pick.id, pick.order, pick.takeId, pick.usage, take ? take.grade : '__missing__'].join('|');
+      }).join('||'),
+    entries: PICKS.map((pick) => {
+      const take = TAKES.find((item) => item.id === pick.takeId);
+      return {
+        pickId: pick.id,
+        order: pick.order,
+        usage: pick.usage,
+        note: pick.note,
+        takeId: pick.takeId,
+        takeNo: take ? take.takeNo : '',
+        startTc: take ? take.startTc : '00:00:00:00',
+        endTc: take ? take.endTc : '00:00:00:00',
+        grade: take ? take.grade : '可用'
+      };
+    })
+  }
+];
+
+/** 灌入演示数据（项目 → 曲目 → 场次 → Take → 优选 / 补录 → 确认版）；目标库由调用方传入，避免反向 import */
 export async function seedDatabase(target: GbStudioTakeDatabase): Promise<void> {
   await target.transaction(
     'rw',
-    [target.projects, target.songs, target.sessions, target.takes, target.picks, target.retakes],
+    [target.projects, target.songs, target.sessions, target.takes, target.picks, target.retakes, target.editListVersions],
     async () => {
       await target.projects.bulkPut(PROJECTS.map(rev));
       await target.songs.bulkPut(SONGS.map(rev));
@@ -75,6 +111,7 @@ export async function seedDatabase(target: GbStudioTakeDatabase): Promise<void> 
       await target.takes.bulkPut(TAKES.map(rev));
       await target.picks.bulkPut(PICKS.map(rev));
       await target.retakes.bulkPut(RETAKES.map(rev));
+      await target.editListVersions.bulkPut(EDIT_LIST_VERSIONS.map((item) => revAt(item, EDIT_LIST_SEED_TIME)));
     }
   );
 }

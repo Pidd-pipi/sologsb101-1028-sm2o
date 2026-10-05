@@ -7,12 +7,14 @@ import {
   Card,
   Form,
   Input,
+  InputNumber,
   Modal,
   Popconfirm,
   Select,
   Space,
   Table,
   Tag,
+  Tooltip,
   message
 } from 'antd';
 import { PlusOutlined } from '@ant-design/icons';
@@ -28,8 +30,16 @@ import {
   SESSION_STATES,
   STUDIO_ROOMS,
   createEmptySession,
-  type Session
+  type Session,
+  type SessionPeriod
 } from '@/types/session';
+import {
+  PERIOD_DEFAULT_MINUTES,
+  ROOM_DAILY_CAPACITY_MIN,
+  sessionDurationMin,
+  type RoomDayBooking
+} from '@/types/capacity';
+import { findOverCapacityDays, formatMinutes, summarizeRoomDay } from '@/utils/capacity';
 import type { FilterModel, FilterSelectConfig } from '@/types/filter';
 import { formatDuration, totalDuration } from '@/utils/timecode';
 
@@ -128,6 +138,20 @@ export default function SessionPlan() {
       .map(([key]) => key.replace(/\|/g, ' · '));
   }, [sessions]);
 
+  /** 棚日容量账：每个棚每天 480 分钟，超出即点名（含挤占场次与曲目） */
+  const overDays = useMemo(() => findOverCapacityDays(sessions), [sessions]);
+
+  const songTitleOf = (songId: string): string => songOf(songId)?.title ?? '曲目已删除';
+
+  const overDayText = (booking: RoomDayBooking): string => {
+    const detail = booking.sessions
+      .map((item) => `${item.period}《${songTitleOf(item.songId)}》${formatMinutes(item.durationMin)}`)
+      .join('、');
+    return `${booking.roomNo} · ${booking.date} 已排 ${formatMinutes(booking.usedMin)}（超 ${formatMinutes(
+      booking.usedMin - ROOM_DAILY_CAPACITY_MIN
+    )}）：${detail}`;
+  };
+
   const totals = useMemo(() => {
     const relevantTakes = takes.filter((take) =>
       scopedSessions.map((session) => session.id).includes(take.sessionId)
@@ -170,7 +194,9 @@ export default function SessionPlan() {
       <div className="page__head">
         <div>
           <h2 className="page__title">场次安排与参与乐手</h2>
-          <p className="page__subtitle">同一棚号同一天同一时段只允许一场；冲突会被拦截并提示占用场次。</p>
+          <p className="page__subtitle">
+            每个棚每天按 {ROOM_DAILY_CAPACITY_MIN} 分钟（8 小时）记账；剩余容量不足时拒绝保存并点名挤占场次，同一棚号同一天同一时段只允许一场。
+          </p>
         </div>
         <Button
           type="primary"
@@ -204,6 +230,16 @@ export default function SessionPlan() {
           showIcon
           message={`检测到 ${conflicts.length} 处棚号时段占用冲突`}
           description={conflicts.join('；')}
+        />
+      ) : null}
+
+      {overDays.length > 0 ? (
+        <Alert
+          type="error"
+          showIcon
+          message={`检测到 ${overDays.length} 个棚日超出 ${ROOM_DAILY_CAPACITY_MIN} 分钟容量`}
+          description={overDays.map(overDayText).join('；')}
+          style={{ marginTop: conflicts.length > 0 ? 8 : 0 }}
         />
       ) : null}
 
@@ -253,7 +289,41 @@ export default function SessionPlan() {
               },
               { title: '日期', dataIndex: 'date', width: 120 },
               { title: '时段', dataIndex: 'period', width: 90 },
+              {
+                title: '场次时长',
+                dataIndex: 'durationMin',
+                width: 110,
+                render: (value: number | undefined, row) => {
+                  const minutes = sessionDurationMin({ period: row.period, durationMin: value });
+                  const text = formatMinutes(minutes);
+                  return typeof value === 'number' ? (
+                    text
+                  ) : (
+                    <Tooltip title="历史数据缺时长，已按原时段回填">{text}</Tooltip>
+                  );
+                }
+              },
               { title: '棚号', dataIndex: 'roomNo', width: 100 },
+              {
+                title: `棚日用量 / ${ROOM_DAILY_CAPACITY_MIN}`,
+                width: 180,
+                render: (_, row) => {
+                  const booking = summarizeRoomDay(row.roomNo, row.date, sessions);
+                  const tone = booking.overCapacity ? 'error' : booking.remainMin < 60 ? 'warning' : 'default';
+                  return (
+                    <Space size={4} direction="vertical">
+                      <Tag color={tone}>
+                        {booking.usedMin} / {ROOM_DAILY_CAPACITY_MIN} 分钟
+                      </Tag>
+                      <span className="muted">
+                        {booking.overCapacity
+                          ? `超 ${formatMinutes(booking.usedMin - ROOM_DAILY_CAPACITY_MIN)}`
+                          : `剩 ${formatMinutes(booking.remainMin)}`}
+                      </span>
+                    </Space>
+                  );
+                }
+              },
               { title: '录音师', dataIndex: 'engineer', width: 100 },
               { title: '参与乐手', dataIndex: 'musicians', minWidth: 200 },
               {
@@ -284,6 +354,7 @@ export default function SessionPlan() {
                           songId: row.songId,
                           date: row.date,
                           period: row.period,
+                          durationMin: sessionDurationMin(row),
                           engineer: row.engineer,
                           roomNo: row.roomNo,
                           musicians: row.musicians,
@@ -334,12 +405,31 @@ export default function SessionPlan() {
               }))}
             />
           </Form.Item>
-          <Space size={12}>
+          <Space size={12} wrap>
             <Form.Item name="date" label="日期" rules={[{ required: true, message: '请选择日期' }]}>
               <Input type="date" style={{ width: 180 }} />
             </Form.Item>
             <Form.Item name="period" label="时段" rules={[{ required: true }]}>
-              <Select style={{ width: 140 }} options={SESSION_PERIODS.map((item) => ({ label: item, value: item }))} />
+              <Select
+                style={{ width: 140 }}
+                options={SESSION_PERIODS.map((item) => ({ label: item, value: item }))}
+                onChange={(value: SessionPeriod) => {
+                  // 切换时段时，若时长仍是另一时段的默认值，则按新时段回填
+                  const current = form.getFieldValue('durationMin') as number | undefined;
+                  const currentDefault = PERIOD_DEFAULT_MINUTES[form.getFieldValue('period') as SessionPeriod];
+                  if (current === undefined || current === currentDefault) {
+                    form.setFieldsValue({ durationMin: PERIOD_DEFAULT_MINUTES[value] });
+                  }
+                }}
+              />
+            </Form.Item>
+            <Form.Item
+              name="durationMin"
+              label="场次时长（分钟）"
+              rules={[{ required: true, message: '请填写场次时长' }]}
+              extra={<span className="muted">每棚每日上限 {ROOM_DAILY_CAPACITY_MIN} 分钟</span>}
+            >
+              <InputNumber style={{ width: 160 }} min={1} max={ROOM_DAILY_CAPACITY_MIN} step={15} />
             </Form.Item>
             <Form.Item name="roomNo" label="棚号" rules={[{ required: true }]}>
               <Select style={{ width: 160 }} options={STUDIO_ROOMS.map((item) => ({ label: item, value: item }))} />

@@ -1,6 +1,7 @@
 /**
  * 场次记录表 JSON 序列化与校验
  * 补录页用于导出整份棚务记录，也是「导入导出备份」的数据校验入口。
+ * 剪接清单未确认 / 已失效时 buildSessionSheet 抛错，导出停住；旧确认版随表存档可查。
  */
 import type { Project } from '../types/project';
 import type { Song } from '../types/song';
@@ -8,9 +9,21 @@ import type { Session } from '../types/session';
 import type { Take } from '../types/take';
 import type { Pick } from '../types/pick';
 import type { Retake } from '../types/retake';
-import { DB_NAME, DB_SCHEMA_VERSION, listPicks, listProjects, listRetakes, listSessions, listSongs, listTakes } from './db';
+import type { EditListVersion } from '../types/editList';
+import {
+  DB_NAME,
+  DB_SCHEMA_VERSION,
+  listPicks,
+  listProjects,
+  listRetakes,
+  listSessions,
+  listSongs,
+  listTakes,
+  listEditListVersions
+} from './db';
 import { formatDuration, totalDuration } from './timecode';
 import { nowIso } from './uuid';
+import { assertExportReady, deriveEditListStatus } from './editList';
 
 /** 场次记录表中的一行 */
 export interface SessionSheetRow {
@@ -38,6 +51,14 @@ export interface SessionSheet {
   takes: Take[];
   picks: Pick[];
   retakes: Retake[];
+  /** 剪接清单确认版历史（旧确认版存档可查） */
+  editListVersions: EditListVersion[];
+  /** 本次导出所依据的确认版（导出闸门通过后一定存在） */
+  confirmedEditList: {
+    version: number;
+    confirmedAt: number;
+    entryCount: number;
+  } | null;
   summary: {
     projectCount: number;
     songCount: number;
@@ -62,16 +83,25 @@ function stripRevision<T extends WithRevision>(row: T): T {
   return copy as T;
 }
 
-/** 汇总整份场次记录表 */
+/**
+ * 汇总整份场次记录表。
+ * 剪接清单未确认或已失效时抛错（导出停住），错误信息点名失效引用；
+ * 调用方（补录页）捕获后提示先去优选页重新确认。
+ */
 export async function buildSessionSheet(): Promise<SessionSheet> {
-  const [projects, songs, sessions, takes, picks, retakes] = await Promise.all([
+  const [projects, songs, sessions, takes, picks, retakes, editListVersions] = await Promise.all([
     listProjects(),
     listSongs(),
     listSessions(),
     listTakes(),
     listPicks(),
-    listRetakes()
+    listRetakes(),
+    listEditListVersions()
   ]);
+
+  // 导出闸门：评级改动后清单立即失效，重新确认前停住
+  const editListStatus = deriveEditListStatus({ picks, takes, versions: editListVersions });
+  assertExportReady(editListStatus);
 
   const rows: SessionSheetRow[] = sessions.map((session) => {
     const song = songs.find((item) => item.id === session.songId);
@@ -94,6 +124,7 @@ export async function buildSessionSheet(): Promise<SessionSheet> {
   });
 
   const usable = takes.filter((item) => item.grade === '可用').length;
+  const latest = editListStatus.latest;
 
   return {
     name: DB_NAME,
@@ -105,6 +136,10 @@ export async function buildSessionSheet(): Promise<SessionSheet> {
     takes: takes.map(stripRevision),
     picks: picks.map(stripRevision),
     retakes: retakes.map(stripRevision),
+    editListVersions: editListVersions.map(stripRevision),
+    confirmedEditList: latest
+      ? { version: latest.version, confirmedAt: latest.confirmedAt, entryCount: latest.entries.length }
+      : null,
     summary: {
       projectCount: projects.length,
       songCount: songs.length,
