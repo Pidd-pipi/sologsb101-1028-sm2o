@@ -36,6 +36,7 @@ import {
   removeRetake,
   DB_NAME,
   DB_SCHEMA_VERSION,
+  type PickSnapshotRow,
   type ProjectRow,
   type RetakeRow,
   type SessionRow,
@@ -45,6 +46,7 @@ import {
 import { RETAKE_STATES, createEmptyRetake, type Retake } from '@/types/retake';
 import { buildRow } from '@/hooks/useIdbTable';
 import { buildSessionSheet, downloadJson, parseSheet, serializeSheet, type SessionSheet } from '@/utils/export';
+import { assessPickList } from '@/utils/pickList';
 import { formatDuration, totalDuration } from '@/utils/timecode';
 
 export default function RetakePlan() {
@@ -53,6 +55,8 @@ export default function RetakePlan() {
   const projects = useIdbTable<ProjectRow>(db.projects);
   const sessions = useIdbTable<SessionRow>(db.sessions);
   const takes = useIdbTable<TakeRow>(db.takes);
+  const picks = useIdbTable(db.picks);
+  const pickSnapshots = useIdbTable<PickSnapshotRow>(db.pickSnapshots);
   const currentProjectId = useProjectStore((state) => state.currentProjectId);
 
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -79,6 +83,13 @@ export default function RetakePlan() {
   const scopedRetakes = currentProjectId
     ? retakes.filter((retake) => songOf(retake.songId)?.projectId === currentProjectId)
     : retakes;
+
+  /** 剪接清单确认状态：未重新确认时场次记录表导出停在这里 */
+  const pickAssessment = useMemo(
+    () => assessPickList(picks, takes, pickSnapshots),
+    [picks, takes, pickSnapshots]
+  );
+  const pickListBlocked = pickAssessment.status !== 'confirmed' && pickAssessment.status !== 'empty';
 
   /** 由有问题的 Take 生成补录建议 */
   const problemTakes = useMemo(
@@ -143,10 +154,16 @@ export default function RetakePlan() {
   }
 
   async function exportSheet(): Promise<void> {
-    const current = await buildSessionSheet();
-    setSheet(current);
-    downloadJson(`场次记录表-${current.exportedAt.slice(0, 10)}.json`, serializeSheet(current));
-    message.success('场次记录表已下载');
+    try {
+      const current = await buildSessionSheet();
+      setSheet(current);
+      downloadJson(`场次记录表-${current.exportedAt.slice(0, 10)}.json`, serializeSheet(current));
+      message.success('场次记录表已下载');
+    } catch (exportError) {
+      const text = exportError instanceof Error ? exportError.message : '导出失败';
+      setError(text);
+      message.error(`导出已停住：${text}`);
+    }
   }
 
   async function exportLibrary(): Promise<void> {
@@ -183,14 +200,19 @@ export default function RetakePlan() {
         <div>
           <h2 className="page__title">补录计划与结构版本导出</h2>
           <p className="page__subtitle">
-            本地库 {DB_NAME}（结构版本 v{DB_SCHEMA_VERSION}）· 补录完成后自动联动曲目录制状态。
+            本地库 {DB_NAME}（结构版本 v{DB_SCHEMA_VERSION}）· 补录完成后自动联动曲目录制状态；剪接清单重新确认前记录表导出停住。
           </p>
         </div>
         <Space>
           <Button icon={<DownloadOutlined />} onClick={exportLibrary}>
             导出整库备份
           </Button>
-          <Button type="primary" icon={<DownloadOutlined />} onClick={exportSheet}>
+          <Button
+            type="primary"
+            icon={<DownloadOutlined />}
+            danger={pickListBlocked}
+            onClick={exportSheet}
+          >
             导出场次记录表
           </Button>
           <Button
@@ -214,6 +236,20 @@ export default function RetakePlan() {
         <StatBadge label="问题 Take" value={totals.problemTakes} suffix="条" tone="danger" icon="histogram" />
         <StatBadge label="待补录时长" value={totals.openDurationText} tone="info" icon="trend" />
       </div>
+
+      {pickListBlocked ? (
+        <Alert
+          type="error"
+          showIcon
+          message="场次记录表导出已停住：剪接清单尚未重新确认"
+          description={pickAssessment.reason}
+          action={
+            <Button type="primary" size="small" href="#/picks">
+              前往优选与剪接页确认
+            </Button>
+          }
+        />
+      ) : null}
 
       {error ? <Alert type="error" showIcon message={error} closable onClose={() => setError(null)} /> : null}
 
@@ -363,6 +399,15 @@ export default function RetakePlan() {
                 <Descriptions.Item label="记录表生成时间">
                   {sheet ? sheet.exportedAt.slice(0, 19).replace('T', ' ') : '—'}
                 </Descriptions.Item>
+                <Descriptions.Item label="剪接清单确认">
+                  {pickListBlocked ? (
+                    <Tag color="red">失效 / 未确认</Tag>
+                  ) : pickAssessment.latestSnapshot ? (
+                    <Tag color="green">{pickAssessment.latestSnapshot.confirmedAt.slice(0, 19).replace('T', ' ')}</Tag>
+                  ) : (
+                    <Tag>清单为空</Tag>
+                  )}
+                </Descriptions.Item>
               </Descriptions>
               <Space style={{ marginTop: 12 }} wrap>
                 <Button
@@ -386,8 +431,14 @@ export default function RetakePlan() {
                 </Button>
                 <Button
                   onClick={async () => {
-                    setSheet(await buildSessionSheet());
-                    message.success('已重新生成场次记录表');
+                    try {
+                      setSheet(await buildSessionSheet());
+                      message.success('已重新生成场次记录表');
+                    } catch (refreshError) {
+                      const text = refreshError instanceof Error ? refreshError.message : '生成失败';
+                      setError(text);
+                      message.error(`记录表生成已停住：${text}`);
+                    }
                   }}
                 >
                   刷新记录表

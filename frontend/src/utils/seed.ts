@@ -14,6 +14,7 @@ import type {
   SessionRow,
   TakeRow,
   PickRow,
+  PickSnapshotRow,
   RetakeRow
 } from './db';
 import { ROW_REVISION } from './revision';
@@ -37,10 +38,10 @@ const SONGS: Array<Omit<SongRow, 'revision' | 'createdAt' | 'updatedAt'>> = [
 ];
 
 const SESSIONS: Array<Omit<SessionRow, 'revision' | 'createdAt' | 'updatedAt'>> = [
-  { id: 'ss-001', songId: 'sg-001', date: '2024-03-12', period: '上午', engineer: '赵鸣', roomNo: 'A 棚', musicians: '鼓：许峰、贝斯：黎川、吉他：程野', state: '已完成' },
-  { id: 'ss-002', songId: 'sg-001', date: '2024-03-13', period: '下午', engineer: '赵鸣', roomNo: 'A 棚', musicians: '弦乐四重奏', state: '已完成' },
-  { id: 'ss-003', songId: 'sg-002', date: '2024-03-20', period: '晚上', engineer: '何笙', roomNo: 'B 棚', musicians: '大提琴：闻州', state: '已排期' },
-  { id: 'ss-004', songId: 'sg-003', date: '2024-03-18', period: '上午', engineer: '赵鸣', roomNo: 'C 棚', musicians: '钢琴：苏禾', state: '已完成' }
+  { id: 'ss-001', songId: 'sg-001', date: '2024-03-12', period: '上午', durationMin: 240, engineer: '赵鸣', roomNo: 'A 棚', musicians: '鼓：许峰、贝斯：黎川、吉他：程野', state: '已完成' },
+  { id: 'ss-002', songId: 'sg-001', date: '2024-03-13', period: '下午', durationMin: 240, engineer: '赵鸣', roomNo: 'A 棚', musicians: '弦乐四重奏', state: '已完成' },
+  { id: 'ss-003', songId: 'sg-002', date: '2024-03-20', period: '晚上', durationMin: 180, engineer: '何笙', roomNo: 'B 棚', musicians: '大提琴：闻州', state: '已排期' },
+  { id: 'ss-004', songId: 'sg-003', date: '2024-03-18', period: '上午', durationMin: 240, engineer: '赵鸣', roomNo: 'C 棚', musicians: '钢琴：苏禾', state: '已完成' }
 ];
 
 const TAKES: Array<Omit<TakeRow, 'revision' | 'createdAt' | 'updatedAt'>> = [
@@ -53,9 +54,23 @@ const TAKES: Array<Omit<TakeRow, 'revision' | 'createdAt' | 'updatedAt'>> = [
 ];
 
 const PICKS: Array<Omit<PickRow, 'revision' | 'createdAt' | 'updatedAt'>> = [
-  { id: 'pk-001', takeId: 'tk-001', usage: '主歌', order: 1, note: '第 1 段最稳，鼓组干净' },
-  { id: 'pk-002', takeId: 'tk-004', usage: '副歌', order: 2, note: '弦乐起弓整齐' },
-  { id: 'pk-003', takeId: 'tk-006', usage: '全曲', order: 3, note: '钢琴整轨留作参考' }
+  { id: 'pk-001', takeId: 'tk-001', usage: '主歌', order: 1, note: '第 1 段最稳，鼓组干净', snapshotGrade: '可用' },
+  { id: 'pk-002', takeId: 'tk-004', usage: '副歌', order: 2, note: '弦乐起弓整齐', snapshotGrade: '可用' },
+  { id: 'pk-003', takeId: 'tk-006', usage: '全曲', order: 3, note: '钢琴整轨留作参考', snapshotGrade: '可用' }
+];
+
+/** 演示用的最近确认版剪接清单（旧确认版可在页面内翻查） */
+const PICK_SNAPSHOTS: Array<Omit<PickSnapshotRow, 'revision' | 'createdAt' | 'updatedAt'>> = [
+  {
+    id: 'pk-snap-001',
+    confirmedAt: '2024-03-19T10:00:00.000Z',
+    itemCount: 3,
+    items: [
+      { pickId: 'pk-001', takeId: 'tk-001', takeNo: 'T01', startTc: '00:00:12:00', endTc: '00:04:05:00', grade: '可用', usage: '主歌', order: 1, note: '第 1 段最稳，鼓组干净' },
+      { pickId: 'pk-002', takeId: 'tk-004', takeNo: 'T01', startTc: '00:00:30:00', endTc: '00:03:50:00', grade: '可用', usage: '副歌', order: 2, note: '弦乐起弓整齐' },
+      { pickId: 'pk-003', takeId: 'tk-006', takeNo: 'T01', startTc: '00:00:08:00', endTc: '00:03:45:00', grade: '可用', usage: '全曲', order: 3, note: '钢琴整轨留作参考' }
+    ]
+  }
 ];
 
 const RETAKES: Array<Omit<RetakeRow, 'revision' | 'createdAt' | 'updatedAt'>> = [
@@ -67,7 +82,15 @@ const RETAKES: Array<Omit<RetakeRow, 'revision' | 'createdAt' | 'updatedAt'>> = 
 export async function seedDatabase(target: GbStudioTakeDatabase): Promise<void> {
   await target.transaction(
     'rw',
-    [target.projects, target.songs, target.sessions, target.takes, target.picks, target.retakes],
+    [
+      target.projects,
+      target.songs,
+      target.sessions,
+      target.takes,
+      target.picks,
+      target.retakes,
+      target.pickSnapshots
+    ],
     async () => {
       await target.projects.bulkPut(PROJECTS.map(rev));
       await target.songs.bulkPut(SONGS.map(rev));
@@ -75,6 +98,7 @@ export async function seedDatabase(target: GbStudioTakeDatabase): Promise<void> 
       await target.takes.bulkPut(TAKES.map(rev));
       await target.picks.bulkPut(PICKS.map(rev));
       await target.retakes.bulkPut(RETAKES.map(rev));
+      await target.pickSnapshots.bulkPut(PICK_SNAPSHOTS.map(rev));
     }
   );
 }

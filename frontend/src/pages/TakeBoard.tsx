@@ -26,7 +26,7 @@ import { useIdbTable } from '@/hooks/useIdbTable';
 import { useTakeFilter } from '@/hooks/useTakeFilter';
 import { useTakeStore } from '@/stores/takeStore';
 import { useSessionStore } from '@/stores/sessionStore';
-import { db, type ProjectRow, type SessionRow, type SongRow, type TakeRow } from '@/utils/db';
+import { db, picksReferencingTakes, type ProjectRow, type SessionRow, type SongRow, type TakeRow } from '@/utils/db';
 import { TAKE_GRADES, TAKE_ISSUES, createEmptyTake, type Take, type TakeGrade } from '@/types/take';
 import type { FilterSelectConfig } from '@/types/filter';
 import {
@@ -213,6 +213,14 @@ export default function TakeBoard() {
     if (editing) {
       await editTake(editing.id, values);
       message.success('条次已更新');
+      if (values.grade !== editing.grade) {
+        const linked = await picksReferencingTakes([editing.id]);
+        if (linked.length > 0) {
+          message.warning(
+            `评级由「${editing.grade}」改为「${values.grade}」：引用它的 ${linked.length} 条优选立即失效，需到优选页重新确认`
+          );
+        }
+      }
     } else {
       await createTake(values);
       message.success('条次已标记');
@@ -301,8 +309,17 @@ export default function TakeBoard() {
               disabled={selectedIds.length === 0}
               onChange={(value) => {
                 void (async () => {
-                  await batchGrade(selectedIds, value as TakeGrade);
-                  message.success(`已将 ${selectedIds.length} 条改为「${value}」`);
+                  const grade = value as TakeGrade;
+                  // 仅对评级确实发生变化的条次提示牵连失效
+                  const changedIds = selectedIds.filter((id) => takes.find((item) => item.id === id)?.grade !== grade);
+                  const linked = await picksReferencingTakes(changedIds);
+                  await batchGrade(selectedIds, grade);
+                  message.success(`已将 ${selectedIds.length} 条改为「${grade}」`);
+                  if (linked.length > 0) {
+                    message.warning(
+                      `${linked.length} 条优选引用的 Take 评级被修改，优选清单立即失效，重新确认前导出停住`
+                    );
+                  }
                 })();
               }}
             />

@@ -165,3 +165,13 @@ body {
 .take-row-selected {
   background: #eef6fb;
 }
+
+/* 评级改动导致失效的优选卡片 / 明细行 */
+.pick-card-stale {
+  border-color: #ffa39e;
+  background: #fff7f6;
+}
+
+.pick-row-stale > td {
+  background: #fff7f6 !important;
+}

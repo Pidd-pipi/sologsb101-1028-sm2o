@@ -44,7 +44,7 @@ docker compose up -d --build      # 代码改动后重新构建
 | 构建工具 | Vite 5 | 开发服务器端口 22828 |
 | 状态管理 | Zustand 4 | `projectStore` / `sessionStore` / `takeStore` / `pickStore` |
 | 路由 | React Router 6（`createBrowserRouter` + 懒加载） | nginx 侧配合 `try_files` 做 SPA fallback |
-| 本地存储 | Dexie 4（IndexedDB 封装） | 库名 `gbstudiotake-db`，含结构版本号与 upgrade 迁移 |
+| 本地存储 | Dexie 4（IndexedDB 封装） | 库名 `gbstudiotake-db`，含结构版本号与 upgrade 迁移（当前 v2） |
 | 容器化 | Docker 多阶段构建：`node:20-alpine` → `nginx:alpine` | 构建阶段执行类型检查与打包，运行阶段仅托管静态产物 |
 
 ---
@@ -66,10 +66,10 @@ npm run preview    # 本地预览构建产物（http://localhost:22828）
 | 路由 | 模块 | 消费模型 | 主要交互 |
 | --- | --- | --- | --- |
 | `/projects` | 录音项目与曲目台账 | Project、Song | 新建/编辑/删除项目与曲目（删除确认与级联）、按状态与委托方筛选、卡片回显曲目数 / 场次数 / 已优选 Take 数、筛选同步 URL query |
-| `/sessions` | 场次安排与参与乐手 | Session、Song | 按日期与棚号排期、**同棚号同时段冲突真实拦截并列出占用场次**、乐手席位统计、增删改 |
-| `/takes` | Take 标记台 | Take、Session | 录入起止时间码（校验先后、重叠提示）、同场次 Take 号自动递增、问题标签与评级、**表格多选批量改评级**、时间码区间筛选 |
-| `/picks` | 优选 Take 汇总 | Pick、Take | 从「可用」条次中挑选、**拖拽卡片 + 上下移调整剪接顺序**、自动生成剪接清单与合计时长、备注编辑 |
-| `/retakes` | 补录计划与导出 | Retake 及全部模型 | 由问题 Take 一键生成补录、状态流转与完成联动曲目状态、场次记录表导出、本地库版本查看与整库导入导出 |
+| `/sessions` | 场次安排与参与乐手 | Session、Song | 按日期与棚号排期、**同棚号同时段冲突真实拦截并列出占用场次**、**每棚每天 480 分钟容量校验，超时拒绝保存并点名挤占场次**、乐手席位统计、增删改 |
+| `/takes` | Take 标记台 | Take、Session | 录入起止时间码（校验先后、重叠提示）、同场次 Take 号自动递增、问题标签与评级、**表格多选批量改评级（牵连失效的优选会被点名）**、时间码区间筛选 |
+| `/picks` | 优选 Take 汇总 | Pick、Take、PickSnapshot | 从「可用」条次中挑选、**拖拽卡片 + 上下移调整剪接顺序**、自动生成剪接清单与合计时长、备注编辑、**Take 评级一改动引用它的优选立即失效、重新确认后才放行导出、旧确认版可翻查** |
+| `/retakes` | 补录计划与导出 | Retake 及全部模型 | 由问题 Take 一键生成补录、状态流转与完成联动曲目状态、**场次记录表导出闸口（剪接清单未重新确认则停住）**、本地库版本查看与整库导入导出 |
 
 ---
 
@@ -105,8 +105,11 @@ sologsb101-1028/
 
 ## 六、数据存储说明
 
-- **IndexedDB 库名**：`gbstudiotake-db`（Dexie 封装），结构版本号 `version(1)`，并带 `upgrade()` 迁移逻辑（为历史行补齐行修订号与时间戳）。
-- **分表存储**：`projects` 项目、`songs` 曲目、`sessions` 场次、`takes` 条次、`picks` 优选、`retakes` 补录，共 6 张表；每行带 `revision` / `createdAt` / `updatedAt`。
+- **IndexedDB 库名**：`gbstudiotake-db`（Dexie 封装），当前结构版本号 `version(2)`，并带 `upgrade()` 迁移逻辑。
+- **分表存储**：`projects` 项目、`songs` 曲目、`sessions` 场次（含 `durationMin` 时长）、`takes` 条次、`picks` 优选（含确认评级快照 `snapshotGrade`）、`retakes` 补录、`pickSnapshots` 剪接清单历史确认版，共 7 张表；每行带 `revision` / `createdAt` / `updatedAt`。
+- **v1 → v2 迁移**：旧场次没有场次时长时**按原时段回填**（上午/下午各 240 分钟、晚上 180、通宵 300）；旧优选按所引 Take 的当前评级补 `snapshotGrade`，并把迁移时的清单整体落为一版确认快照，升级后不会凭空卡住导出。
+- **棚日容量**：每个棚每天按 **480 分钟**安排（已取消场次不计容量）；新增/编辑场次若使同棚同日总时长超过 480 分钟，保存被拒绝，错误信息点名挤占容量的场次与曲目。
+- **优选确认与导出闸口**：Take 评级一修改，引用它的优选立即失效（确认快照评级与当前评级不一致）；清单新增 / 删除 / 调序 / 改备注 / 改时间码同样需要重新确认。重新确认前「导出场次记录表」停住；每次确认都会在 `pickSnapshots` 冻结一版，旧确认版在优选页随时可查。
 - **首屏自动播种**：`utils/db.ts` 的 `initDatabase()` 在 `projects` 表为空时调用 `seedDatabase()`，灌入互相引用的三层演示数据（项目 → 曲目 → 场次 → Take → 优选 / 补录），保证 5 个页面首次打开都有内容；播种幂等，清空后重进会重新播种。
 - **时间码规则**：格式 `HH:MM:SS:FF`，帧率 25 帧；`utils/timecode.ts` 提供互转、时长汇总、重叠检测与 Take 号自动递增。
 - **无后端**：没有 API 服务、没有数据库容器；容器本身无状态，不挂载任何卷。

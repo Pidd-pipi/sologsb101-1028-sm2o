@@ -7,6 +7,7 @@ import {
   Card,
   Form,
   Input,
+  InputNumber,
   Modal,
   Popconfirm,
   Select,
@@ -24,6 +25,8 @@ import { useSessionStore } from '@/stores/sessionStore';
 import { useProjectStore } from '@/stores/projectStore';
 import { db, type ProjectRow, type SessionRow, type SongRow, type TakeRow } from '@/utils/db';
 import {
+  PERIOD_DEFAULT_MINUTES,
+  ROOM_DAILY_CAPACITY_MIN,
   SESSION_PERIODS,
   SESSION_STATES,
   STUDIO_ROOMS,
@@ -128,6 +131,29 @@ export default function SessionPlan() {
       .map(([key]) => key.replace(/\|/g, ' · '));
   }, [sessions]);
 
+  /** 棚日容量占用：同一棚同一天（已取消除外）总时长超过 480 分钟即超时 */
+  const overloads = useMemo(() => {
+    const groups = new Map<string, SessionRow[]>();
+    sessions.forEach((session) => {
+      if (session.state === '已取消') return;
+      const key = `${session.roomNo}|${session.date}`;
+      groups.set(key, [...(groups.get(key) ?? []), session]);
+    });
+    return Array.from(groups.entries())
+      .map(([key, rows]) => {
+        const usedMin = rows.reduce((sum, item) => sum + (item.durationMin ?? PERIOD_DEFAULT_MINUTES[item.period] ?? 0), 0);
+        return {
+          key,
+          roomNo: rows[0].roomNo,
+          date: rows[0].date,
+          usedMin,
+          remainingMin: ROOM_DAILY_CAPACITY_MIN - usedMin,
+          rows
+        };
+      })
+      .filter((group) => group.remainingMin < 0);
+  }, [sessions]);
+
   const totals = useMemo(() => {
     const relevantTakes = takes.filter((take) =>
       scopedSessions.map((session) => session.id).includes(take.sessionId)
@@ -170,7 +196,9 @@ export default function SessionPlan() {
       <div className="page__head">
         <div>
           <h2 className="page__title">场次安排与参与乐手</h2>
-          <p className="page__subtitle">同一棚号同一天同一时段只允许一场；冲突会被拦截并提示占用场次。</p>
+          <p className="page__subtitle">
+            每个棚每天按 {ROOM_DAILY_CAPACITY_MIN} 分钟安排；同棚同时段只允许一场，容量不足时拒绝保存并点名挤占场次。
+          </p>
         </div>
         <Button
           type="primary"
@@ -204,6 +232,29 @@ export default function SessionPlan() {
           showIcon
           message={`检测到 ${conflicts.length} 处棚号时段占用冲突`}
           description={conflicts.join('；')}
+        />
+      ) : null}
+
+      {overloads.length > 0 ? (
+        <Alert
+          type="error"
+          showIcon
+          message={`检测到 ${overloads.length} 个棚日超出 ${ROOM_DAILY_CAPACITY_MIN} 分钟容量`}
+          description={
+            <Space direction="vertical" size={4}>
+              {overloads.map((group) => (
+                <div key={group.key}>
+                  <strong>
+                    {group.roomNo} · {group.date}
+                  </strong>
+                  ：已排 {group.usedMin} 分钟，超 {-group.remainingMin} 分钟；挤占场次：
+                  {group.rows
+                    .map((item) => `《${songOf(item.songId)?.title ?? '曲目已删除'}》${item.period} ${item.durationMin} 分钟`)
+                    .join('、')}
+                </div>
+              ))}
+            </Space>
+          }
         />
       ) : null}
 
@@ -253,7 +304,32 @@ export default function SessionPlan() {
               },
               { title: '日期', dataIndex: 'date', width: 120 },
               { title: '时段', dataIndex: 'period', width: 90 },
-              { title: '棚号', dataIndex: 'roomNo', width: 100 },
+              {
+                title: '场次时长',
+                dataIndex: 'durationMin',
+                width: 100,
+                render: (value: number | undefined, row) => (
+                  <span>{value ?? PERIOD_DEFAULT_MINUTES[row.period]} 分钟</span>
+                )
+              },
+              {
+                title: '棚号 / 当日余量',
+                width: 170,
+                render: (_, row) => {
+                  const used = sessions
+                    .filter((item) => item.roomNo === row.roomNo && item.date === row.date && item.state !== '已取消')
+                    .reduce((sum, item) => sum + (item.durationMin ?? PERIOD_DEFAULT_MINUTES[item.period] ?? 0), 0);
+                  const remaining = ROOM_DAILY_CAPACITY_MIN - used;
+                  return (
+                    <Space size={4}>
+                      <span>{row.roomNo}</span>
+                      <Tag color={remaining < 0 ? 'red' : remaining <= 60 ? 'orange' : 'green'}>
+                        余 {remaining} 分
+                      </Tag>
+                    </Space>
+                  );
+                }
+              },
               { title: '录音师', dataIndex: 'engineer', width: 100 },
               { title: '参与乐手', dataIndex: 'musicians', minWidth: 200 },
               {
@@ -284,6 +360,7 @@ export default function SessionPlan() {
                           songId: row.songId,
                           date: row.date,
                           period: row.period,
+                          durationMin: row.durationMin ?? PERIOD_DEFAULT_MINUTES[row.period],
                           engineer: row.engineer,
                           roomNo: row.roomNo,
                           musicians: row.musicians,
@@ -339,10 +416,32 @@ export default function SessionPlan() {
               <Input type="date" style={{ width: 180 }} />
             </Form.Item>
             <Form.Item name="period" label="时段" rules={[{ required: true }]}>
-              <Select style={{ width: 140 }} options={SESSION_PERIODS.map((item) => ({ label: item, value: item }))} />
+              <Select
+                style={{ width: 120 }}
+                options={SESSION_PERIODS.map((item) => ({ label: item, value: item }))}
+                onChange={(value: Session['period']) =>
+                  form.setFieldValue('durationMin', PERIOD_DEFAULT_MINUTES[value])
+                }
+              />
+            </Form.Item>
+            <Form.Item
+              name="durationMin"
+              label="场次时长（分钟）"
+              rules={[
+                { required: true, message: '请填写场次时长' },
+                {
+                  validator: (_, value: number) =>
+                    Number.isFinite(value) && value > 0 && value <= ROOM_DAILY_CAPACITY_MIN
+                      ? Promise.resolve()
+                      : Promise.reject(new Error(`时长须在 1–${ROOM_DAILY_CAPACITY_MIN} 分钟之间`))
+                }
+              ]}
+              extra={<span className="muted">每棚每天共 {ROOM_DAILY_CAPACITY_MIN} 分钟</span>}
+            >
+              <InputNumber min={1} max={ROOM_DAILY_CAPACITY_MIN} step={15} style={{ width: 150 }} />
             </Form.Item>
             <Form.Item name="roomNo" label="棚号" rules={[{ required: true }]}>
-              <Select style={{ width: 160 }} options={STUDIO_ROOMS.map((item) => ({ label: item, value: item }))} />
+              <Select style={{ width: 140 }} options={STUDIO_ROOMS.map((item) => ({ label: item, value: item }))} />
             </Form.Item>
           </Space>
           <Form.Item name="engineer" label="录音师" rules={[{ required: true, message: '请填写录音师' }]}>

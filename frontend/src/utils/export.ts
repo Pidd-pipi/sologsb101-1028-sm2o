@@ -1,14 +1,28 @@
 /**
  * 场次记录表 JSON 序列化与校验
  * 补录页用于导出整份棚务记录，也是「导入导出备份」的数据校验入口。
+ *
+ * 导出闸口：Take 评级修改后，引用它的优选清单立即失效，未重新确认前
+ * buildSessionSheet 会直接抛错，导出停住（旧确认版仍可在优选页查看）。
  */
 import type { Project } from '../types/project';
 import type { Song } from '../types/song';
 import type { Session } from '../types/session';
 import type { Take } from '../types/take';
-import type { Pick } from '../types/pick';
+import type { Pick, PickSnapshot } from '../types/pick';
 import type { Retake } from '../types/retake';
-import { DB_NAME, DB_SCHEMA_VERSION, listPicks, listProjects, listRetakes, listSessions, listSongs, listTakes } from './db';
+import {
+  DB_NAME,
+  DB_SCHEMA_VERSION,
+  assertPickListExportable,
+  listPicks,
+  listPickSnapshots,
+  listProjects,
+  listRetakes,
+  listSessions,
+  listSongs,
+  listTakes
+} from './db';
 import { formatDuration, totalDuration } from './timecode';
 import { nowIso } from './uuid';
 
@@ -17,6 +31,8 @@ export interface SessionSheetRow {
   sessionId: string;
   date: string;
   period: string;
+  /** 场次时长（分钟） */
+  durationMin: number;
   roomNo: string;
   engineer: string;
   songTitle: string;
@@ -37,6 +53,7 @@ export interface SessionSheet {
   sessions: Session[];
   takes: Take[];
   picks: Pick[];
+  pickSnapshots: PickSnapshot[];
   retakes: Retake[];
   summary: {
     projectCount: number;
@@ -48,6 +65,8 @@ export interface SessionSheet {
     pickedCount: number;
     openRetakeCount: number;
     totalDurationText: string;
+    /** 导出时剪接清单最近一次确认时间（未确认为 null） */
+    pickConfirmedAt: string | null;
     rows: SessionSheetRow[];
   };
 }
@@ -62,15 +81,21 @@ function stripRevision<T extends WithRevision>(row: T): T {
   return copy as T;
 }
 
-/** 汇总整份场次记录表 */
+/**
+ * 汇总整份场次记录表。
+ * 剪接清单未经确认（评级改动失效 / 有结构改动 / 从未确认）时抛出错误，调用方负责停住导出。
+ */
 export async function buildSessionSheet(): Promise<SessionSheet> {
-  const [projects, songs, sessions, takes, picks, retakes] = await Promise.all([
+  await assertPickListExportable();
+
+  const [projects, songs, sessions, takes, picks, retakes, pickSnapshots] = await Promise.all([
     listProjects(),
     listSongs(),
     listSessions(),
     listTakes(),
     listPicks(),
-    listRetakes()
+    listRetakes(),
+    listPickSnapshots()
   ]);
 
   const rows: SessionSheetRow[] = sessions.map((session) => {
@@ -82,6 +107,7 @@ export async function buildSessionSheet(): Promise<SessionSheet> {
       sessionId: session.id,
       date: session.date,
       period: session.period,
+      durationMin: session.durationMin,
       roomNo: session.roomNo,
       engineer: session.engineer,
       songTitle: song ? song.title : '曲目已删除',
@@ -104,6 +130,7 @@ export async function buildSessionSheet(): Promise<SessionSheet> {
     sessions: sessions.map(stripRevision),
     takes: takes.map(stripRevision),
     picks: picks.map(stripRevision),
+    pickSnapshots: pickSnapshots.map(stripRevision),
     retakes: retakes.map(stripRevision),
     summary: {
       projectCount: projects.length,
@@ -115,6 +142,7 @@ export async function buildSessionSheet(): Promise<SessionSheet> {
       pickedCount: picks.length,
       openRetakeCount: retakes.filter((item) => item.state !== '已完成').length,
       totalDurationText: formatDuration(totalDuration(takes)),
+      pickConfirmedAt: pickSnapshots[0]?.confirmedAt ?? null,
       rows
     }
   };
